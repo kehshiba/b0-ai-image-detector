@@ -1,117 +1,136 @@
-# 🟢 Veritas — AI Image Detector (CIFAKE · Real vs AI-Generated)
+# Veritas — AI Image Detector
 
-High-performance, production-ready **REAL vs FAKE** image classifier with a
-Spotify-inspired dark UI (Montserrat + `#1DB954`), an optimized PyTorch /
-ONNX inference pipeline targeting **< 200 ms / image**, and full
-"behind the scenes" telemetry streamed live to the browser.
+Binary image classifier distinguishing real photographs from AI-generated images,
+served through a FastAPI backend with a zero-build web UI.
 
-![stack](https://img.shields.io/badge/model-EfficientNet--B0-1DB954)
-![api](https://img.shields.io/badge/API-FastAPI-009688)
-![ui](https://img.shields.io/badge/UI-Tailwind_Montserrat-191414)
+The default model is EfficientNet-B0 fine-tuned on CIFAKE (and optionally on a
+higher-resolution multi-generator set), with an ONNX Runtime fast path for CPU
+inference. Every prediction returns the verdict plus per-stage timings, device
+and engine details, and a step-by-step processing log.
 
----
+## Features
 
-## 1 · Architecture
+- Real vs. AI-generated classification with calibrated confidence scores
+- Fast inference: ONNX Runtime on CPU, FP16 mixed precision on CUDA
+- Single model load at startup; thread-isolated inference per request
+- Per-request telemetry: decode / preprocess / forward / postprocess timings
+- Activation insights from the final convolutional block
+- Web UI with drag-and-drop, paste-from-clipboard, and result visualization
+- User-feedback endpoint for collecting corrections and continual learning
+- Server-Sent Events stream of recent predictions
 
-```
-┌───────────── Browser (Montserrat + Spotify theme) ─────────────┐
-│  dropzone: click · drag&drop · paste (Ctrl+V) → preview        │
-│  confidence ring + REAL/FAKE bars · telemetry chips            │
-│  “behind the scenes” terminal ← streams logs[] line-by-line    │
-└─────────────────────────── ▲ ─────────────────────────────────┘
-              POST /api/predict (multipart image)
-┌─────────────┴──────────────────────────────────────────────────┐
-│ FastAPI (app.py) — model loaded ONCE at startup (lifespan)     │
-│  AIDetector.predict_bytes():                                   │
-│   decode (PIL) → preprocess (resize/centercrop/normalize)      │
-│   → forward (ONNX-RT ▸ torch-fp16 ▸ torch-fp32) → sigmoid      │
-│   → activation insights (last-conv hook: mean/std/sparsity)    │
-│  TelemetryCollector → terminal report + JSON {label,            │
-│   confidence, telemetry{stages_ms, device, shapes…}, logs[]}   │
-└────────────────────────────────────────────────────────────────┘
-```
-
-| Decision | Why |
-|---|---|
-| **EfficientNet-B0** default (~5.3 M params) | Best accuracy/latency for binary CIFAKE; `MODEL_BACKBONE=resnet50` optional |
-| **ONNX Runtime + FP16 AMP + channels_last** | Graph fusion / half-precision / optimal memory layout → sub-200 ms |
-| **Singleton model + `inference_mode`** | No per-request reload, no autograd overhead |
-| **FastAPI + vanilla Tailwind UI** | Zero build step — `uvicorn app:app` just works |
-| **SSE `/api/logs/stream` + per-request `logs[]`** | Real-time "AI thought process" in the UI terminal |
-
-## 2 · Project structure
+## Project structure
 
 ```
-AI Image Detector/
-├── app.py                  # FastAPI entry: routes, lifespan model load, SSE
-├── config.py               # all knobs (backbone, threshold, FP16/ONNX, limits)
-├── train.py                # CIFAKE fine-tuning (AdamW, cosine, AMP, early stop)
-├── export_onnx.py          # checkpoint → .onnx (opset 17, dynamic batch)
+.
+├── app.py                  # FastAPI app: routes, startup model load, SSE log stream
+├── config.py               # Central configuration (env-overridable)
+├── train.py                # Fine-tuning on CIFAKE or HQ data
+├── export_onnx.py          # Checkpoint export to ONNX (opset 18)
+├── learn_feedback.py       # Continual learning from collected user feedback
+├── setup_data.py           # Fresh-clone data setup: CIFAKE -> _raw -> NEWER -> HQ
+├── dl_hq_real.py           # Download COCO val2017 real photos (~900 MB)
+├── dl_newer.py             # Download newer-generator HF shards (~1.2 GB)
+├── build_newer.py          # Assemble data/NEWER (CIFAKE + newer fakes)
+├── build_hq.py             # Assemble data/HQ (high-resolution, balanced)
+├── eval_check.py           # Evaluation helper
 ├── requirements.txt
+├── render.yaml             # Render deployment (Python runtime, free tier)
+├── Dockerfile              # Container deployment fallback
 ├── ai_detector/
 │   ├── __init__.py
-│   ├── model.py            # backbone factory + preprocessing (mirrors train)
-│   ├── inference.py        # AIDetector: optimized pipeline + activation probe
-│   └── telemetry.py        # colourised terminal logs + per-request collector
+│   ├── model.py            # Backbone factory and preprocessing
+│   ├── inference.py        # AIDetector pipeline and activation probe
+│   └── telemetry.py        # Request telemetry and log formatting
 ├── static/
-│   ├── index.html          # Spotify-style UI
-│   ├── styles.css          # design system (green #1DB954, animations)
-│   └── app.js              # click/drag/paste, skeleton, ring, log streaming
-└── weights/                # *.pt + *.onnx live here (see weights/README.txt)
+│   ├── index.html          # Web UI
+│   ├── styles.css          # Stylesheet
+│   └── app.js              # Upload handling, result rendering, log streaming
+└── weights/                # Checkpoints (*.pt) and ONNX graphs (*.onnx)
 ```
 
-## 3 · Quickstart (run locally)
+## Requirements
 
-**Prerequisites:** Python 3.10+ · (optional) CUDA GPU · ~2 GB disk.
+- Python 3.10 or newer
+- Approximately 2 GB of free disk space
+- A CUDA-capable GPU is optional (CPU inference is fully supported)
+- Training requires a GPU for practical runtimes
+
+## Getting started
 
 ```powershell
-# 1 — enter the project
-cd "C:\Users\LENOVO\Documents\AI Image Detector"
+git clone <repository-url>
+cd "AI Image Detector"
 
-# 2 — virtual env + deps  (use python -m venv if `py` shim missing)
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# 3 — launch (demo mode works immediately, no weights needed)
 uvicorn app:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Open **http://127.0.0.1:8000** → drop / paste any image → hit **Analyze**.
-API docs: **http://127.0.0.1:8000/docs** · health: `/api/health`.
+Open `http://127.0.0.1:8000`, upload an image, and select Analyze.
+Interactive API documentation is available at `http://127.0.0.1:8000/docs`.
 
-> ⚠️ First run downloads ImageNet base weights (~20 MB) and runs in **demo
-> mode** until you train — predictions become accurate only after step 4.
+> Note: without trained weights the server runs in demo mode on ImageNet base
+> weights (~20 MB, downloaded on first run). Predictions become accurate only
+> after training as described below.
 
-## 4 · Train on CIFAKE (for real accuracy)
+## Data setup
+
+`data/` is not versioned. On a fresh clone, prepare datasets with:
 
 ```powershell
-# 1 — download CIFAKE (Kaggle: birdy654/cifake-real-and-ai-generated-synthetic-images)
-#     extract so you have: data/CIFAKE/train/{REAL,FAKE} + data/CIFAKE/test/{REAL,FAKE}
-
-# 2 — fine-tune (~93-96% test acc, 12 epochs, GPU recommended)
-python train.py --data ./data/CIFAKE --epochs 12 --batch 64 --backbone efficientnet_b0
-
-# 3 — export ONNX fast path (recommended for CPU)
-python export_onnx.py --backbone efficientnet_b0
-
-# 4 — restart the server; the header pill flips to your device/engine
-uvicorn app:app --host 127.0.0.1 --port 8000
+python setup_data.py --check     # report what exists and what is missing
+python setup_data.py --dry-run   # preview the plan without downloading
+python setup_data.py             # full run (resumable; skips completed stages)
 ```
 
-Useful env knobs: `DEVICE=cuda|cpu|auto` · `USE_FP16=1` · `USE_ONNX=1` ·
-`USE_COMPILE=1` (torch≥2, CUDA) · `THRESHOLD=0.5` · `MODEL_BACKBONE=resnet50`.
+The pipeline resolves, in order: `data/CIFAKE` (manual Kaggle download or
+`kagglehub`), `data/_raw` shards, `data/HQ_SRC_REAL`, `data/NEWER`, and
+`data/HQ`. See `python setup_data.py --help` for `--only`, `--skip`, and
+`--auto-install` options. Expect roughly 2.1 GB of downloads plus built copies.
 
-## 5 · API reference
+## Training
+
+Fine-tune on CIFAKE (approximately 93–96% test accuracy, 12 epochs):
+
+```powershell
+python train.py --data ./data/CIFAKE --epochs 12 --batch 64 --backbone efficientnet_b0
+python export_onnx.py --backbone efficientnet_b0
+```
+
+For the higher-resolution multi-generator set:
+
+```powershell
+python train.py --data ./data/HQ --backbone efficientnet_b0 --img-size 384
+python export_onnx.py --backbone efficientnet_b0
+```
+
+Restart the server after training so the new checkpoint is loaded.
+
+### Continual learning from user feedback
+
+Corrections submitted through the UI are stored under
+`data/feedback/{REAL,FAKE}/` with an entry in `data/feedback_log.csv`. Once at
+least 20 feedback images are collected:
+
+```powershell
+python learn_feedback.py --backbone efficientnet_b0 --img-size 384 --epochs 5 --batch 32
+python export_onnx.py --backbone efficientnet_b0
+```
+
+## API reference
 
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/` | Web UI |
-| `GET` | `/api/health` | `{status, device, engine, params, fine_tuned…}` |
-| `GET` | `/api/model/info` | backbone / dtype / ONNX availability |
-| `POST` | `/api/predict` | multipart `file` → `{label, confidence, prob_real, prob_fake, logit, telemetry, activations, logs[]}` |
-| `GET` | `/api/logs/stream` | SSE tail of recent predictions |
+| `GET` | `/api/health` | Liveness probe with device, engine, and model metadata |
+| `GET` | `/api/model/info` | Backbone, parameter count, dtype, and ONNX availability |
+| `POST` | `/api/predict` | Multipart `file` field; returns label, confidence, telemetry, and log lines |
+| `POST` | `/api/feedback` | Submit a correction (`file`, `true_label`, `pred_label`, `confidence`) |
+| `GET` | `/api/logs/stream` | Server-Sent Events stream of recent predictions |
 
 Example:
 
@@ -126,27 +145,55 @@ curl -F "file=@sample.jpg" http://127.0.0.1:8000/api/predict
   "telemetry": { "total_ms": 41.2, "stages_ms": {"decode": 3.1, "preprocess": 2.4, "forward": 34.9, "postprocess": 0.1},
                  "device": "CPU", "engine": "onnx", "throughput_img_s": 24.3 },
   "activations": {"channels": 1280, "channel_mean": 0.31, "sparsity": 0.42, "top_channels": [921, 44, 117]},
-  "logs": ["[+   3.2ms] [decode] PIL image mode=RGB size=(512, 512) …"]
+  "logs": ["[+   3.2ms] [decode] PIL image mode=RGB size=(512, 512) ..."]
 }
 ```
 
-Terminal prints a matching colourised report (timings, shapes, confidence) on every request.
+## Configuration
 
-## 6 · Performance notes
+All settings live in `config.py` and can be overridden with environment variables:
 
-Measured on EfficientNet-B0 @224px: **~35 ms CPU (ONNX)** · **~12 ms CUDA (FP16)** —
-well under the 200 ms budget. Keep `IMAGE_SIZE=224`, prefer ONNX on CPU and
-FP16 on GPU; `USE_COMPILE=1` can shave another ~15% on Ampere+ GPUs.
+| Variable | Default | Description |
+|---|---|---|
+| `DEVICE` | `auto` | `auto` (CUDA if available, else CPU), `cuda`, or `cpu` |
+| `USE_ONNX` | `1` | Prefer the ONNX Runtime graph when available |
+| `USE_FP16` | `1` | FP16 mixed precision (CUDA only) |
+| `USE_COMPILE` | `0` | `torch.compile` (PyTorch 2+, CUDA) |
+| `IMAGE_SIZE` | `384` | Center-crop size; must match the training resolution |
+| `THRESHOLD` | `0.5` | Decision threshold on P(FAKE) |
+| `MODEL_BACKBONE` | `efficientnet_b0` | `efficientnet_b0`, `resnet50`, `convnext_tiny`, or `efficientnet_v2_s` |
+| `MAX_UPLOAD_MB` | `15` | Maximum accepted upload size |
+| `PORT` / `HOST` | `8000` / `127.0.0.1` | Server bind address |
 
-## 7 · Troubleshooting
+## Performance
 
-| Symptom | Fix |
+EfficientNet-B0 reference figures: approximately 35 ms per image on CPU via
+ONNX Runtime and 12 ms on CUDA via FP16. Prefer ONNX on CPU and FP16 on GPU;
+`USE_COMPILE=1` can reduce latency by a further ~15% on Ampere and newer GPUs.
+Raising `IMAGE_SIZE` to 384 (the HQ default) increases accuracy on
+high-resolution images at the cost of higher latency.
+
+## Deployment
+
+The service binds to `$PORT` and runs CPU-only when `DEVICE=cpu`, so it works
+on platforms without GPU access. `render.yaml` provides a Render free-tier
+configuration (Python runtime with a CPU-only PyTorch install); `Dockerfile`
+is available as a container fallback. See `weights/README.txt` for checkpoint
+details.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
 |---|---|
-| `backend offline` pill | `uvicorn` not running / wrong port — check terminal |
-| `415 Unsupported type` | Convert to JPG/PNG/WEBP/BMP |
-| `413 File exceeds` | Images ≤ 15 MB (`MAX_UPLOAD_MB`) |
-| Slow first prediction | One-time warm-up + weight download; subsequent calls are fast |
-| Low accuracy | You're in demo mode — run `train.py` on CIFAKE |
+| `backend offline` status in the UI | Server not running or wrong port; check the `uvicorn` process |
+| `415 Unsupported type` | Convert the image to JPG, PNG, WEBP, or BMP |
+| `413 File exceeds limit` | Images must be within `MAX_UPLOAD_MB` (default 15 MB) |
+| Slow first prediction | One-time weight download and kernel warm-up; later requests are fast |
+| Low accuracy | Server is in demo mode; train on CIFAKE or HQ data first |
 
-Built with PyTorch · FastAPI · ONNX Runtime · Tailwind · Montserrat.
-Dataset: CIFAKE — Bird & Lotfi (2024), real photos vs Stable-Diffusion fakes.
+## Acknowledgments
+
+Built with PyTorch, FastAPI, and ONNX Runtime. Training data: CIFAKE (Bird and
+Lotfi, 2024) — real CIFAR photographs versus Stable Diffusion generations —
+supplemented with COCO photographs and openly licensed synthetic-image sets.
+See per-script headers for dataset licenses and suggested citations.
