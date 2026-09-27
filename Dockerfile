@@ -22,13 +22,16 @@ RUN pip install --upgrade pip && \
 
 COPY . .
 
-# Render injects $PORT dynamically — do NOT hardcode. CPU-only, keep 384 to match cifake/hq weights.
+# Render injects $PORT dynamically — do NOT hardcode. 224px + torch path
+# keeps RSS under the 512MB free-tier limit (384px + ONNX overflows it).
 ENV DEVICE=cpu \
-    USE_ONNX=1 \
+    USE_ONNX=0 \
     USE_FP16=0 \
-    IMAGE_SIZE=384 \
-    HOST=0.0.0.0
+    IMAGE_SIZE=224 \
+    HOST=0.0.0.0 \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
